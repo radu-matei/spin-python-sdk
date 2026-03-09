@@ -1,4 +1,5 @@
 bindings
+build/
 *.wasm
 __pycache__
 .spin
