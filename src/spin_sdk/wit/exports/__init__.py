@@ -61,7 +61,7 @@ class IncomingHandler(Protocol):
 
 
 class Handler(Protocol):
-    """WASIp3 HTTP handler (wasi:http/handler@0.3.0-rc-2026-01-06)."""
+    """WASIp3 HTTP handler (wasi:http/handler@0.3.0-rc-2026-03-15)."""
 
     @abstractmethod
     async def handle(self, request: Any) -> Any:

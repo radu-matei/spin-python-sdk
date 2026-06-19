@@ -1,0 +1,16 @@
+spin_manifest_version = 2
+
+[application]
+name = "spin-stateful"
+version = "0.1.0"
+authors = ["The Spin authors"]
+description = "A stateful counter component addressed via spin.alt."
+
+# The counter has no trigger of its own; it is reached via the spin.alt
+# addressing scheme from another component (e.g. a router). See README.md.
+[component.counter]
+source = "app.wasm"
+stateful = true
+[component.counter.build]
+command = "componentize-py --all-features componentize -m spin_sdk=spin-stateful-http app -o app.wasm"
+watch = ["app.py"]
