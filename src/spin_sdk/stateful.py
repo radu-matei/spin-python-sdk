@@ -132,10 +132,14 @@ def _get_http_types(request):
 def _get_world_helpers():
     """Discover componentize-py's stream/future helpers on the world module.
 
-    componentize-py generates ``byte_stream()`` (for ``stream<u8>``) and a
-    trailers-future constructor (for ``future<result<option<fields>,
-    error-code>>``) on the world module.  The trailers-future function has
-    an auto-generated name, so we find it by inspecting the module.
+    componentize-py generates ``byte_stream()`` (for ``stream<u8>``) and, for
+    each distinct ``future`` type the world uses, a constructor with an
+    auto-generated name.  We need two of those futures, told apart by name:
+
+    - the **trailers** future ``future<result<option<fields>, error-code>>``,
+      used when building a response, and
+    - the **unit** future ``future<result<_, error-code>>``, which is the
+      ``res`` argument to ``request.consume-body`` (and ``response.consume-body``).
     """
     global _world_helpers
     if _world_helpers is not None:
@@ -145,25 +149,48 @@ def _get_world_helpers():
 
     byte_stream_fn = getattr(world, "byte_stream", None)
 
+    # wasi:http/types has exactly two `error-code` futures: the trailers future
+    # `result<option<fields>, error-code>` (named with "fields") and the unit
+    # future `result<_, error-code>` (everything else). Tell them apart by the
+    # presence of "fields" rather than relying on the exact "unit" spelling.
     trailers_future_fn = None
+    unit_future_fn = None
     for name in dir(world):
-        if name.endswith("_future") and "fields" in name and "error_code" in name:
-            trailers_future_fn = getattr(world, name)
-            break
+        if not (name.endswith("_future") and "error_code" in name):
+            continue
+        if "fields" in name:
+            trailers_future_fn = trailers_future_fn or getattr(world, name)
+        else:
+            unit_future_fn = unit_future_fn or getattr(world, name)
 
-    _world_helpers = (byte_stream_fn, trailers_future_fn)
+    _world_helpers = (byte_stream_fn, trailers_future_fn, unit_future_fn)
     return _world_helpers
 
 
 def _make_trailers_future():
     """Create a resolved trailers future indicating no trailers and no error."""
     from componentize_py_types import Ok
-    _, trailers_future_fn = _get_world_helpers()
+    _, trailers_future_fn, _ = _get_world_helpers()
     if trailers_future_fn is None:
         raise RuntimeError(
             "Could not find trailers-future constructor on the world module"
         )
     return trailers_future_fn(lambda: Ok(None))[1]
+
+
+def _make_unit_future():
+    """Create a resolved ``future<result<_, error-code>>`` (unit Ok, no error).
+
+    This is the ``res`` argument required by ``request.consume-body`` — it lets
+    the caller signal an error in handling the request; we always resolve it Ok.
+    """
+    from componentize_py_types import Ok
+    _, _, unit_future_fn = _get_world_helpers()
+    if unit_future_fn is None:
+        raise RuntimeError(
+            "Could not find unit result-future constructor on the world module"
+        )
+    return unit_future_fn(lambda: Ok(None))[1]
 
 
 def _make_body_stream(body_bytes):
@@ -175,7 +202,7 @@ def _make_body_stream(body_bytes):
     if not body_bytes:
         return None
 
-    byte_stream_fn, _ = _get_world_helpers()
+    byte_stream_fn, _, _ = _get_world_helpers()
     if byte_stream_fn is None:
         raise RuntimeError(
             "Could not find byte_stream constructor on the world module"
@@ -219,7 +246,19 @@ def _make_handler_class():
                 for name, value in headers_resource.copy_all()
             )
 
-            body = b""
+            # Consume the incoming request body. In WASIp3 the body is a
+            # `stream<u8>`: `consume-body` is a static func that *moves* the
+            # request (so method/uri/headers must already be read, as above) and
+            # returns the readable stream end plus a trailers future. Drain it to
+            # bytes, reading until the writer end is closed.
+            body_rx = http_types.Request.consume_body(request, _make_unit_future())[0]
+            body_chunks = []
+            with body_rx:
+                while not body_rx.writer_dropped:
+                    chunk = await body_rx.read(64 * 1024)
+                    if chunk:
+                        body_chunks.append(chunk)
+            body = b"".join(body_chunks)
 
             try:
                 result = _component_instance.handle_request(
